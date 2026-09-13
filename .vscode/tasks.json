@@ -1,0 +1,101 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: configure",
+            "type": "shell",
+            "command": "cmake -S . -B build",
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: build all",
+            "type": "shell",
+            "command": "cmake --build build -j",
+            "dependsOn": "CMake: configure",
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "CMake: configure (asan+ubsan)",
+            "type": "shell",
+            "command": "cmake -S . -B build-asan -DSANITIZE=address",
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: build all (asan+ubsan)",
+            "type": "shell",
+            "command": "cmake --build build-asan -j",
+            "dependsOn": "CMake: configure (asan+ubsan)",
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "type": "cppbuild",
+            "label": "C/C++: g++ build active file",
+            "command": "/bin/g++",
+            "args": [
+                "-fdiagnostics-color=always",
+                "-std=c++20",
+                "-Wall",
+                "-Wextra",
+                "-Wpedantic",
+                "-g",
+                "-pthread",
+                "${file}",
+                "-o",
+                "${fileDirname}/${fileBasenameNoExtension}"
+            ],
+            "options": {
+                "cwd": "${fileDirname}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "Build the open file with C++20, warnings and threads."
+        },
+        {
+            "type": "cppbuild",
+            "label": "C/C++: g++ build active file (asan+ubsan)",
+            "command": "/bin/g++",
+            "args": [
+                "-fdiagnostics-color=always",
+                "-std=c++20",
+                "-Wall",
+                "-Wextra",
+                "-Wpedantic",
+                "-fsanitize=address,undefined",
+                "-fno-sanitize-recover=all",
+                "-fno-omit-frame-pointer",
+                "-g",
+                "${file}",
+                "-o",
+                "${fileDirname}/${fileBasenameNoExtension}_asan"
+            ],
+            "options": {
+                "cwd": "${fileDirname}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "detail": "Build the open file with AddressSanitizer + UndefinedBehaviorSanitizer."
+        }
+    ]
+}

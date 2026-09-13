@@ -1,0 +1,14 @@
+# CMake build trees
+/build/
+/build-asan/
+/build-tsan/
+
+# The "C/C++: g++ build active file" task writes executables next to the
+# sources, so ignore everything in src/ except the sources themselves.
+/src/*
+!/src/*.cpp
+
+# Editor / OS noise
+*.o
+*.swp
+.DS_Store

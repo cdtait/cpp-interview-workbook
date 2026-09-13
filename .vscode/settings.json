@@ -1,0 +1,19 @@
+{
+  "cmake.configureOnOpen": true,
+  "C_Cpp.default.cppStandard": "c++20",
+  "clangd.enable": false,
+  "C_Cpp.intelliSenseEngine": "default",
+  "[cpp]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools"
+  },
+  "files.watcherExclude": {
+    "**/build/**": true,
+    "**/build-asan/**": true,
+    "**/build-tsan/**": true
+  },
+  "search.exclude": {
+    "**/build": true,
+    "**/build-asan": true,
+    "**/build-tsan": true
+  }
+}
