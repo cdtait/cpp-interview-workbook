@@ -160,6 +160,13 @@ exactly that reason — read it before trusting a row.
   writer, and an audit of the seqlock already in `F1_feed_handling.cpp` — which
   has four defects, none visible on x86.
 
+- J4 Disruptor: a pre-allocated ring where every consumer sees every event —
+  fan-out without copying, gating (the producer cannot lap the slowest consumer,
+  so fullness *is* the slowest consumer's position), dependency chains
+  (journal → replicate → apply), and automatic batching, which is the property
+  the design exists for: under load batches grow, so per-event synchronisation
+  falls and throughput rises to meet the load.
+
 J- and K-series targets are compiled `-O2` (see `CMakeLists.txt`); the rest of the
 workbook is deliberately unoptimised so source and behaviour line up.
 

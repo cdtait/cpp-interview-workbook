@@ -102,7 +102,23 @@ void print_all(const Ts&... vs) {
     std::putchar('\n');
 }
 
-// A fold over && short-circuits, which a recursive version would not do for free.
+// One instantiation, whatever the pack length. A recursive formulation produces
+// one per suffix of the pack — K3 measures 8 against 1 for eight arguments.
+//
+// It is tempting to say the fold "short-circuits where recursion does not".
+// That is wrong three times over:
+//   - `&&` short-circuits in both formulations; it is the same operator;
+//   - when the operands are function ARGUMENTS they are all evaluated before
+//     the call anyway, so neither form short-circuits their evaluation;
+//   - here the operands are compile-time constants, so nothing is evaluated at
+//     run time at all.
+//
+// On that last point: at -O2 a call to this emits no instructions and no symbol
+// — the call site becomes a literal. But `constexpr` alone does not promise
+// that. At -O0 GCC emits the function and calls it. Guaranteed compile-time
+// evaluation needs a constant-evaluated context (`constexpr` variable,
+// `static_assert`, `if constexpr`, template argument), which holds even at -O0;
+// `consteval` makes it mandatory everywhere.
 template <typename... Ts>
 [[nodiscard]] constexpr bool all_arithmetic() { return (std::is_arithmetic_v<Ts> && ...); }
 

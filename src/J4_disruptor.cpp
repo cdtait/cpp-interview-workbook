@@ -258,6 +258,8 @@ int main() {
     std::printf("   Same ring, one consumer, given increasing work per event.\n");
     std::printf("   %-14s %14s %12s %12s %12s\n",
                 "work/event", "ns per event", "batches", "mean batch", "max batch");
+    double ns_at_zero = 0.0, ns_at_four = 0.0;
+    double batch_at_zero = 0.0, batch_at_four = 0.0;
     for (std::uint32_t work : {0u, 4u, 16u, 64u}) {
         const auto r = run(1, kEvents / 5, work, false);
         const auto& c = r.consumers[0];
@@ -265,6 +267,19 @@ int main() {
         std::printf("   %-14u %14.2f %12llu %12.1f %12lld\n", work, r.ns_per_event,
                     static_cast<unsigned long long>(c.batches), mean,
                     static_cast<long long>(c.max_batch));
+        if (work == 0) { ns_at_zero = r.ns_per_event; batch_at_zero = mean; }
+        if (work == 4) { ns_at_four = r.ns_per_event; batch_at_four = mean; }
+    }
+    if (ns_at_zero > 0.0 && ns_at_four > 0.0 && ns_at_four < ns_at_zero) {
+        std::printf("\n   Look at the first two rows: giving the consumer MORE work per event\n");
+        std::printf("   made it FASTER per event (%.2f -> %.2f ns). With no work the consumer\n",
+                    ns_at_zero, ns_at_four);
+        std::printf("   keeps up, so batches stay tiny (%.1f) and it pays a synchronisation\n",
+                    batch_at_zero);
+        std::printf("   every few events. With work it falls behind, batches jump to %.0f,\n",
+                    batch_at_four);
+        std::printf("   and the amortised synchronisation cost drops below the work added.\n");
+        std::printf("   That inversion is the Disruptor's central property, measured.\n");
     }
     std::printf("\n   As the consumer slows down it falls behind, so each wait returns more\n");
     std::printf("   events and the batch grows. One synchronisation now covers many events,\n");
