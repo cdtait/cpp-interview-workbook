@@ -154,6 +154,12 @@ exactly that reason — read it before trusting a row.
   instantiations for recursive packs vs folds, and times real compiles against
   instantiation count.
 
+- J3 SeqLock: optimistic readers that detect they lost, the release/acquire
+  **fences** (not stores) the protocol actually needs, a control reader showing
+  what tearing looks like without them, reader starvation under an unthrottled
+  writer, and an audit of the seqlock already in `F1_feed_handling.cpp` — which
+  has four defects, none visible on x86.
+
 J- and K-series targets are compiled `-O2` (see `CMakeLists.txt`); the rest of the
 workbook is deliberately unoptimised so source and behaviour line up.
 
