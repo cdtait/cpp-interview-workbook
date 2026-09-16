@@ -24,6 +24,7 @@
 #include <climits>
 #include <functional>
 #include <string>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -54,8 +55,10 @@ struct FatBuffer {
     std::uint64_t append(const T& value, std::size_t len, std::uint64_t seed) {
         const auto* src = static_cast<const unsigned char*>(static_cast<const void*>(&value));
         std::uint64_t h = seed;
+        std::size_t j = 0;
         for (std::size_t i = 0; i < len; ++i) {
-            const unsigned char c = src[i % sizeof(T)];
+            const unsigned char c = src[j];
+            if (++j == sizeof(T)) j = 0;        // identical to the shared version
             h ^= c;
             h *= 0x100000001b3ULL;
             h ^= h >> 29;
@@ -73,12 +76,41 @@ struct FatBuffer {
 // function, and the template becomes a type-safe wrapper thin enough to inline
 // away entirely. Same interface, same safety, one copy of the logic.
 // ===========================================================================
-std::uint64_t append_bytes(unsigned char* scratch, const void* data,
-                           std::size_t object_size, std::size_t len, std::uint64_t seed) {
+// The workload both versions run. It is synthetic, and every part of it is
+// chosen for a measurement reason rather than a realistic one:
+//
+//   len          a RUNTIME length, never sizeof(T). This is what makes the body
+//                type-independent, which is the whole premise: with a
+//                compile-time bound the compiler specialises and unrolls per
+//                type, the duplication becomes USEFUL, and the fat version
+//                legitimately wins.
+//   the mixing   an FNV-style multiply plus xor-shifts. Each step depends on the
+//                previous one, so the loop cannot be vectorised or reassociated
+//                away.
+//   the branch   a data-dependent if/else, so the body keeps a real basic-block
+//                structure and a non-trivial size. Without it the loop collapses
+//                and there is not enough code for duplication to show up in.
+//   the store    a side effect the optimiser may not discard; `& 63` keeps it
+//                inside the scratch buffer.
+//   j, not i%n   the cyclic index advances by hand. An earlier version wrote
+//                `src[i % object_size]`, which put a hardware `div` in the inner
+//                loop of THIS function only: object_size is a runtime value
+//                here, but sizeof(T) is a constant inside the template, so every
+//                fat copy dodged a division the shared body paid on every byte.
+//                That penalty has nothing to do with sharing code, and it was
+//                large enough to reverse the 16-type result.
+// [[maybe_unused]]: this definition is the readable reference. The measurement
+// in section 1 compiles a generated copy of the same code, for the attribution
+// reasons explained above generate_source().
+[[maybe_unused]] std::uint64_t append_bytes(unsigned char* scratch, const void* data,
+                                            std::size_t object_size, std::size_t len,
+                                            std::uint64_t seed) {
     const auto* src = static_cast<const unsigned char*>(data);
     std::uint64_t h = seed;
+    std::size_t j = 0;
     for (std::size_t i = 0; i < len; ++i) {
-        const unsigned char c = src[i % object_size];
+        const unsigned char c = src[j];
+        if (++j == object_size) j = 0;          // same cost in both versions
         h ^= c;
         h *= 0x100000001b3ULL;
         h ^= h >> 29;
@@ -156,6 +188,97 @@ struct SymStats { int count = 0; long bytes = 0; };
     return out;
 }
 
+
+// ---------------------------------------------------------------------------
+// Measuring section 1 by reading THIS binary's symbols does not work, and it is
+// worth saying why: the 16-type and 64-type drivers share instantiations
+// (FatBuffer<Tag<0>> serves both), and the compiler inlines some bodies into
+// their driver while leaving others out of line. Attribution becomes guesswork,
+// and an early version of this file silently counted the fat family's driver
+// while omitting 2757 bytes of out-of-line bodies — which reversed the result.
+//
+// So instead: generate a self-contained program per configuration, compile it,
+// and read the .text size. Same approach the compile-time section already uses.
+// ---------------------------------------------------------------------------
+[[nodiscard]] std::string generate_source(int types, bool thin) {
+    std::string src =
+        "#include <cstdint>\n#include <cstddef>\n#include <cstdlib>\n#include <utility>\n"
+        "template <int N> struct Tag { char pad[N + 1]; };\n";
+    if (thin) {
+        src +=
+            "std::uint64_t append_bytes(unsigned char* scratch, const void* data,\n"
+            "                           std::size_t object_size, std::size_t len,\n"
+            "                           std::uint64_t seed) {\n"
+            "  const auto* src = static_cast<const unsigned char*>(data);\n"
+            "  std::uint64_t h = seed; std::size_t j = 0;\n"
+            "  for (std::size_t i = 0; i < len; ++i) {\n"
+            "    const unsigned char c = src[j];\n"
+            "    if (++j == object_size) j = 0;\n"
+            "    h ^= c; h *= 0x100000001b3ULL; h ^= h >> 29;\n"
+            "    if (h & 1) h += (h << 7) ^ (h >> 11); else h -= (h << 3) ^ (h >> 5);\n"
+            "    scratch[i & 63] = static_cast<unsigned char>(h);\n"
+            "  }\n  return h;\n}\n"
+            "template <typename T> struct Buf {\n"
+            "  std::uint64_t append(const T& v, std::size_t len, std::uint64_t s) {\n"
+            "    return append_bytes(scratch_, &v, sizeof(T), len, s); }\n"
+            "  unsigned char scratch_[64]{};\n};\n";
+    } else {
+        src +=
+            "template <typename T> struct Buf {\n"
+            "  std::uint64_t append(const T& v, std::size_t len, std::uint64_t seed) {\n"
+            "    const auto* src = static_cast<const unsigned char*>(\n"
+            "        static_cast<const void*>(&v));\n"
+            "    std::uint64_t h = seed; std::size_t j = 0;\n"
+            "    for (std::size_t i = 0; i < len; ++i) {\n"
+            "      const unsigned char c = src[j];\n"
+            "      if (++j == sizeof(T)) j = 0;\n"
+            "      h ^= c; h *= 0x100000001b3ULL; h ^= h >> 29;\n"
+            "      if (h & 1) h += (h << 7) ^ (h >> 11); else h -= (h << 3) ^ (h >> 5);\n"
+            "      scratch_[i & 63] = static_cast<unsigned char>(h);\n"
+            "    }\n    return h; }\n"
+            "  unsigned char scratch_[64]{};\n};\n";
+    }
+    src += "volatile std::uint64_t sink;\n"
+           "template <int... Is> void touch(std::uint64_t seed, std::size_t len,\n"
+           "                                std::integer_sequence<int, Is...>) {\n"
+           "  ((sink = sink + Buf<Tag<Is>>{}.append(Tag<Is>{}, len, seed + Is)), ...);\n}\n"
+           "int main(int argc, char** argv) {\n"
+           "  const std::uint64_t seed = argc > 1 ? std::atoll(argv[1]) : 7;\n"
+           "  const std::size_t len = argc > 2 ? std::atoll(argv[2]) : 48;\n"
+           "  touch(seed, len, std::make_integer_sequence<int, " + std::to_string(types) + ">{});\n}\n";
+    return src;
+}
+
+// Compile the generated program and report its .text size in bytes.
+[[nodiscard]] long text_bytes(int types, bool thin) {
+    char src_path[] = "/tmp/k3_size_XXXXXX.cpp";
+    const int fd = mkstemps(src_path, 4);
+    if (fd < 0) return -1;
+    const std::string src = generate_source(types, thin);
+    const bool wrote = ::write(fd, src.data(), src.size()) == static_cast<ssize_t>(src.size());
+    ::close(fd);
+    if (!wrote) { ::unlink(src_path); return -1; }
+
+    std::string bin = src_path;
+    bin += ".bin";
+    char cmd[PATH_MAX * 3];
+    std::snprintf(cmd, sizeof(cmd), "g++ -std=c++20 -O2 '%s' -o '%s' 2>/dev/null",
+                  src_path, bin.c_str());
+    long bytes = -1;
+    if (std::system(cmd) == 0) {
+        std::snprintf(cmd, sizeof(cmd),
+                      "size -A '%s' 2>/dev/null | awk '/^\\.text/{print $2}'", bin.c_str());
+        if (std::FILE* pipe = popen(cmd, "r")) {
+            char line[64];
+            if (std::fgets(line, sizeof(line), pipe)) bytes = std::strtol(line, nullptr, 10);
+            pclose(pipe);
+        }
+    }
+    ::unlink(src_path);
+    ::unlink(bin.c_str());
+    return bytes;
+}
+
 // ---------------------------------------------------------------------------
 // Time a real compile of N instantiations.
 // ---------------------------------------------------------------------------
@@ -214,40 +337,25 @@ template <template <typename> class Buffer, int... Is>
 
 int main() {
     std::printf("1. One template, many types: what ends up in the binary\n");
-    std::printf("   The duplicated body does NOT depend on T (runtime length, bytes only),\n");
-    std::printf("   so every copy of it is waste. No noinline: the compiler inlines each\n");
-    std::printf("   family into its driver, and the driver is what we size.\n\n");
+    std::printf("   Identical bodies; the only difference is whether the type-independent\n");
+    std::printf("   work lives inside the template or in one shared function. Each row is a\n");
+    std::printf("   separately generated and compiled program, measured with size(1).\n\n");
     {
-        touch16<FatBuffer>(std::make_integer_sequence<int, 16>{});
-        touch16<ThinBuffer>(std::make_integer_sequence<int, 16>{});
-        touch64<FatBuffer>(std::make_integer_sequence<int, 64>{});
-        touch64<ThinBuffer>(std::make_integer_sequence<int, 64>{});
-
-        const auto shared = symbols_matching("append_bytes");
-        std::printf("   %-10s %14s %14s %10s\n", "types", "fat bytes", "thin bytes", "ratio");
-        for (const char* driver : {"touch16", "touch64"}) {
-            const auto fat  = symbols_matching(driver, "FatBuffer");
-            const auto thin = symbols_matching(driver, "ThinBuffer");
-            const long thin_total = thin.bytes + shared.bytes;
-            if (fat.bytes == 0 || thin_total == 0) continue;
-            std::printf("   %-10s %14ld %14ld %9.2fx\n",
-                        std::strcmp(driver, "touch16") == 0 ? "16" : "64",
-                        fat.bytes, thin_total,
-                        static_cast<double>(fat.bytes) / static_cast<double>(thin_total));
+        std::printf("   %-8s %14s %14s %10s\n", "types", "fat .text", "thin .text", "ratio");
+        for (int types : {4, 16, 64, 128}) {
+            const long fat  = text_bytes(types, false);
+            const long thin = text_bytes(types, true);
+            if (fat < 0 || thin < 0) {
+                std::printf("   %-8d %14s\n", types, "compile failed");
+                continue;
+            }
+            std::printf("   %-8d %14ld %14ld %9.2fx\n", types, fat, thin,
+                        static_cast<double>(fat) / static_cast<double>(thin));
         }
-        std::printf("\n   thin includes the one shared append_bytes body (%ld bytes), counted\n",
-                    shared.bytes);
-        std::printf("   once however many types use it.\n\n");
-        std::printf("   Read the two rows together, because they disagree. At 16 types the\n");
-        std::printf("   FAT version is SMALLER. The body still uses sizeof(T) for one modulo,\n");
-        std::printf("   so each copy gets a compile-time constant where the shared version\n");
-        std::printf("   must take a runtime divisor — and at that scale the specialisation is\n");
-        std::printf("   worth more than the duplication costs. By 64 types the duplication\n");
-        std::printf("   dominates and thin wins almost 2x.\n\n");
-        std::printf("   That crossover IS the lesson. \"Templates cause bloat\" is not a rule,\n");
-        std::printf("   it is a trade between how much of the body genuinely depends on T and\n");
-        std::printf("   how many types you instantiate it for. Neither number is guessable —\n");
-        std::printf("   measure your own, the way this section does.\n");
+        std::printf("\n   The fat column grows with the type count because each type gets its\n");
+        std::printf("   own copy of a body that never needed one. The thin column grows far\n");
+        std::printf("   more slowly: only the wrapper is duplicated, and the wrapper inlines\n");
+        std::printf("   to a call. The shared body is paid for exactly once.\n");
     }
 
     std::printf("\n2. Recursive pack vs fold\n");
