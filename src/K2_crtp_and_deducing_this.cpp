@@ -29,6 +29,7 @@
 // catches up (GCC 14+, Clang 18+, MSVC 19.32+).
 
 #include <chrono>
+#include <compare>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -110,8 +111,41 @@ private:
 
 // ===========================================================================
 // 3 — CRTP as a mixin: adding operations, not dispatching behaviour.
-// This is the use that survives C++23, because it is about code reuse rather
-// than about calling back into the derived type.
+//
+// NOTE FIRST: in C++20 you would not write this. A single defaulted <=> gives
+// you every relational operator, with correct symmetry, no base class, and none
+// of the costs below. Version20 further down is the code you should actually
+// ship; Comparable is here because the PATTERN is worth understanding and still
+// turns up in pre-C++20 codebases.
+//
+// Why the operators are `friend` rather than members or free templates — four
+// reasons, in order of how much they matter:
+//
+//   1. A friend DEFINED INSIDE A CLASS TEMPLATE is not itself a template. Each
+//      instantiation of Comparable<D> emits an ordinary function taking exactly
+//      (const D&, const D&). `nm` shows `operator!=(Version const&, Version
+//      const&)`, with no template arguments. You write it once, generically, and
+//      get a concrete overload per opted-in type.
+//   2. The obvious alternative — hoisting it to namespace scope, where it would
+//      have to be `template <typename D> bool operator!=(const D&, const D&)` —
+//      is catastrophically greedy: it matches ANY two same-typed operands in the
+//      whole program. It rarely hijacks types that have their own operator, but
+//      it wrecks diagnostics for every type that does not: a clean
+//          error: no match for 'operator!=' (operand types are 'NoEq' and 'NoEq')
+//      becomes an instantiation backtrace pointing inside YOUR mixin, for a type
+//      that never heard of it.
+//   3. Hidden friend: the name is not injected into the enclosing namespace, so
+//      it is findable only by ADL. `::operator!=(a, b)` does not compile, while
+//      `a != b` does. Smaller overload sets, no namespace pollution, and the
+//      compiler never considers it for unrelated calls.
+//   4. Symmetry. A member operator takes the left operand as the implicit object,
+//      and no USER-DEFINED conversion is applied there. With a member `operator<`,
+//      `1 < M(2)` fails; with a friend it compiles. Members give asymmetric
+//      comparison, which is almost never what a relational operator should do.
+//
+// Being precise: friend is not strictly REQUIRED. A member version compiles,
+// because derived-to-base on the implicit object is a standard conversion. It
+// just loses reason 4 and adds a static_cast to every body.
 // ===========================================================================
 template <typename Derived>
 struct Comparable {
@@ -129,6 +163,13 @@ struct Version : Comparable<Version> {
     [[nodiscard]] friend bool operator<(const Version& a, const Version& b) {
         return a.major != b.major ? a.major < b.major : a.minor < b.minor;
     }
+};
+
+// The C++20 answer: one line replaces the whole mixin. != is rewritten from ==,
+// and < > <= >= are all synthesised from <=>.
+struct Version20 {
+    int major{}, minor{};
+    auto operator<=>(const Version20&) const = default;
 };
 
 // A counting mixin: each Derived gets its own counter, because each Derived
@@ -252,9 +293,18 @@ int main() {
         // makes Version an aggregate WITH A BASE, so brace initialisation needs
         // a slot for it. A small, real cost of the pattern.
         const Version a{{}, 1, 2}, b{{}, 1, 3};
-        std::printf("   Version{1,2} <  {1,3} = %s   (defined)\n", (a < b) ? "true" : "false");
+        std::printf("   Version{1,2} <  {1,3} = %s   (hand-written)\n", (a < b) ? "true" : "false");
         std::printf("   Version{1,2} >= {1,3} = %s   (supplied by Comparable<Version>)\n",
                     (a >= b) ? "true" : "false");
+
+        // Same results, one line of code, no base class, no brace-init gotcha.
+        const Version20 c{1, 2}, d{1, 3};
+        const bool agree = (a < b) == (c < d) && (a >= b) == (c >= d)
+                        && (a != b) == (c != d) && (a <= b) == (c <= d);
+        std::printf("   Version20 with `auto operator<=>(const Version20&) const = default;`\n");
+        std::printf("     gives <, >, <=, >=, ==, != and agrees with the mixin: %s\n",
+                    agree ? "yes" : "NO");
+        std::printf("     and note Version20{1,2} needs no empty base initialiser\n");
         {
             Widget w1, w2;
             Gadget g1;
@@ -311,7 +361,8 @@ int main() {
     std::printf("     or in C++20 just a constrained free function template, which needs\n");
     std::printf("     no base class at all and is usually the better answer.\n");
     std::printf("   - only adding operations from a few primitives?  mixin CRTP is fine,\n");
-    std::printf("     and remains fine in C++23.\n");
+    std::printf("     and remains fine in C++23 — but for COMPARISON specifically,\n");
+    std::printf("     C++20's defaulted <=> replaces the mixin outright.\n");
     std::printf("   - on C++23?  deducing this, and stop writing the pattern.\n");
     std::printf("   Every CRTP instantiation duplicates the base for each Derived — see K3\n");
     std::printf("   for what that does to the binary.\n");
