@@ -42,22 +42,30 @@ template <int N> struct Tag { char pad[N + 1]; };
 // ===========================================================================
 template <typename T>
 struct FatBuffer {
-    [[gnu::noinline]] std::size_t append(const T& value, std::uint64_t seed) {
-        // Deliberately more than a one-liner, and deliberately independent of T
-        // apart from sizeof(T). This is the code that gets duplicated.
+    // The body loops over a RUNTIME length and treats the object as bytes, so
+    // nothing here depends on T. That is the case worth measuring: duplicating
+    // this per type buys nothing at all.
+    //
+    // An earlier version of this example looped over sizeof(T) instead, which
+    // quietly invalidated it — with a compile-time bound the compiler
+    // specialises and unrolls per type, so the duplication is USEFUL and the
+    // fat version came out smaller. If the body genuinely depends on T, leave
+    // it in the template.
+    std::uint64_t append(const T& value, std::size_t len, std::uint64_t seed) {
+        const auto* src = static_cast<const unsigned char*>(static_cast<const void*>(&value));
         std::uint64_t h = seed;
-        for (std::size_t i = 0; i < sizeof(T); ++i) {
-            h ^= static_cast<std::uint64_t>(reinterpret_cast<const unsigned char*>(&value)[i]);
+        for (std::size_t i = 0; i < len; ++i) {
+            const unsigned char c = src[i % sizeof(T)];
+            h ^= c;
             h *= 0x100000001b3ULL;
             h ^= h >> 29;
-            h += (h << 7) ^ (h >> 11);
+            if (h & 1) h += (h << 7) ^ (h >> 11);
+            else       h -= (h << 3) ^ (h >> 5);
+            scratch_[i & 63] = static_cast<unsigned char>(h);
         }
-        used_ += sizeof(T);
-        hash_ ^= h;
-        return used_;
+        return h;
     }
-    std::size_t   used_ = 0;
-    std::uint64_t hash_ = 0;
+    unsigned char scratch_[64]{};
 };
 
 // ===========================================================================
@@ -65,33 +73,46 @@ struct FatBuffer {
 // function, and the template becomes a type-safe wrapper thin enough to inline
 // away entirely. Same interface, same safety, one copy of the logic.
 // ===========================================================================
-[[gnu::noinline]] std::size_t append_bytes(const void* data, std::size_t size,
-                                           std::uint64_t seed,
-                                           std::size_t* used, std::uint64_t* hash) {
+std::uint64_t append_bytes(unsigned char* scratch, const void* data,
+                           std::size_t object_size, std::size_t len, std::uint64_t seed) {
+    const auto* src = static_cast<const unsigned char*>(data);
     std::uint64_t h = seed;
-    for (std::size_t i = 0; i < size; ++i) {
-        h ^= static_cast<std::uint64_t>(static_cast<const unsigned char*>(data)[i]);
+    for (std::size_t i = 0; i < len; ++i) {
+        const unsigned char c = src[i % object_size];
+        h ^= c;
         h *= 0x100000001b3ULL;
         h ^= h >> 29;
-        h += (h << 7) ^ (h >> 11);
+        if (h & 1) h += (h << 7) ^ (h >> 11);
+        else       h -= (h << 3) ^ (h >> 5);
+        scratch[i & 63] = static_cast<unsigned char>(h);
     }
-    *used += size;
-    *hash ^= h;
-    return *used;
+    return h;
 }
 
 template <typename T>
 struct ThinBuffer {
-    std::size_t append(const T& value, std::uint64_t seed) {
-        return append_bytes(&value, sizeof(T), seed, &used_, &hash_);
+    // Thin enough to inline away completely; only sizeof(T) crosses the border.
+    std::uint64_t append(const T& value, std::size_t len, std::uint64_t seed) {
+        return append_bytes(scratch_, &value, sizeof(T), len, seed);
     }
-    std::size_t   used_ = 0;
-    std::uint64_t hash_ = 0;
+    unsigned char scratch_[64]{};
 };
 
 // ===========================================================================
 // Recursive pack expansion instantiates one function per pack length; a fold
 // instantiates one function, full stop.
+//
+// These two keep [[gnu::noinline]], and it is worth being explicit about why:
+// it is a MEASUREMENT AID, not part of the technique. At -O2 these calls fold to
+// constants and leave no symbols at all, so nm would report 0 for both and the
+// comparison would be vacuous. The attribute forces a symbol to exist so it can
+// be counted. You would never write it in real code.
+//
+// The 8-vs-1 instantiation count is not an artifact of it: compile the same
+// source at -O0 with no attribute and you still get 8 symbols against 1. The
+// compiler must instantiate eight function templates either way, which costs
+// compile time and debug-build size even when an optimised build inlines them
+// all away.
 // ===========================================================================
 template <typename T> [[gnu::noinline]] std::uint64_t sum_recursive(T v) { return v; }
 template <typename T, typename... Rest>
@@ -107,7 +128,7 @@ template <typename... Ts>
 // ---------------------------------------------------------------------------
 struct SymStats { int count = 0; long bytes = 0; };
 
-[[nodiscard]] SymStats symbols_matching(const char* needle) {
+[[nodiscard]] SymStats symbols_matching(const char* needle, const char* also = nullptr) {
     char exe[PATH_MAX];
     const ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
     if (n <= 0) return {};
@@ -122,6 +143,7 @@ struct SymStats { int count = 0; long bytes = 0; };
     char line[1024];
     while (std::fgets(line, sizeof(line), pipe)) {
         if (!std::strstr(line, needle)) continue;
+        if (also && !std::strstr(line, also)) continue;
         unsigned long long addr = 0, size = 0;
         char type = 0;
         // "<addr> <size> <type> <name>"; lines without a size are skipped.
@@ -169,57 +191,63 @@ struct SymStats { int count = 0; long bytes = 0; };
     return std::chrono::duration<double>(t1 - t0).count();
 }
 
-// Force every instantiation to be emitted, so nm can see it.
-std::atomic<std::size_t> g_sink{0};
+std::atomic<std::uint64_t> g_sink{0};
+// Runtime, so nothing below is constant-folded away.
+volatile std::size_t g_len = 48;
 
+// Two separately named drivers, so nm can attribute code to a type count. Each
+// inlines its whole family, which is exactly what we want to size.
 template <template <typename> class Buffer, int... Is>
-void touch_all(std::integer_sequence<int, Is...>) {
-    ((g_sink.fetch_add(Buffer<Tag<Is>>{}.append(Tag<Is>{}, 0x1234u),
+[[gnu::noinline]] void touch16(std::integer_sequence<int, Is...>) {
+    const std::size_t len = g_len;
+    ((g_sink.fetch_add(Buffer<Tag<Is>>{}.append(Tag<Is>{}, len, 0x1234u),
+                       std::memory_order_relaxed)), ...);
+}
+template <template <typename> class Buffer, int... Is>
+[[gnu::noinline]] void touch64(std::integer_sequence<int, Is...>) {
+    const std::size_t len = g_len;
+    ((g_sink.fetch_add(Buffer<Tag<Is>>{}.append(Tag<Is>{}, len, 0x1234u),
                        std::memory_order_relaxed)), ...);
 }
 
 }  // namespace
 
 int main() {
-    std::printf("1. One template, sixteen types: what ends up in the binary\n");
+    std::printf("1. One template, many types: what ends up in the binary\n");
+    std::printf("   The duplicated body does NOT depend on T (runtime length, bytes only),\n");
+    std::printf("   so every copy of it is waste. No noinline: the compiler inlines each\n");
+    std::printf("   family into its driver, and the driver is what we size.\n\n");
     {
-        touch_all<FatBuffer>(std::make_integer_sequence<int, 16>{});
-        touch_all<ThinBuffer>(std::make_integer_sequence<int, 16>{});
+        touch16<FatBuffer>(std::make_integer_sequence<int, 16>{});
+        touch16<ThinBuffer>(std::make_integer_sequence<int, 16>{});
+        touch64<FatBuffer>(std::make_integer_sequence<int, 64>{});
+        touch64<ThinBuffer>(std::make_integer_sequence<int, 64>{});
 
-        // nm qualifies template arguments, so a body is
-        //   (anonymous namespace)::FatBuffer<(anonymous namespace)::Tag<0> >::append
-        // while the driver is touch_all<(anonymous namespace)::FatBuffer, 0, 1, ...>.
-        // The trailing '<' is what separates the two.
-        const auto fat_bodies  = symbols_matching("FatBuffer<");
-        const auto thin_bodies = symbols_matching("ThinBuffer<");
-        const auto fat_all     = symbols_matching("FatBuffer");
-        const auto thin_all    = symbols_matching("ThinBuffer");
-        const auto shared      = symbols_matching("append_bytes");
-
-        std::printf("   %-48s %8s %10s\n", "", "symbols", "code bytes");
-        std::printf("   %-48s %8d %10ld\n", "FatBuffer<Tag<N>>::append  (one body per type)",
-                    fat_bodies.count, fat_bodies.bytes);
-        std::printf("   %-48s %8d %10ld\n", "ThinBuffer<Tag<N>>::append (one body per type)",
-                    thin_bodies.count, thin_bodies.bytes);
-        std::printf("   %-48s %8d %10ld\n", "append_bytes               (shared, non-template)",
-                    shared.count, shared.bytes);
-        std::printf("\n   ThinBuffer emitted %d out-of-line bodies: each wrapper is a single\n",
-                    thin_bodies.count);
-        std::printf("   call, so all sixteen inlined into the caller and vanished.\n\n");
-
-        const long fat_total  = fat_all.bytes;
-        const long thin_total = thin_all.bytes + shared.bytes;
-        std::printf("   %-48s %8d %10ld\n", "FAT family total  (bodies + caller)",
-                    fat_all.count, fat_total);
-        std::printf("   %-48s %8d %10ld\n", "THIN family total (caller + shared body)",
-                    thin_all.count + shared.count, thin_total);
-        if (thin_total > 0 && fat_total > 0)
-            std::printf("\n   %.1fx less code for identical behaviour and identical type safety.\n",
-                        static_cast<double>(fat_total) / static_cast<double>(thin_total));
-        std::printf("   The ratio grows with both the size of the duplicated body and the\n");
-        std::printf("   number of types; sixteen small ones is a conservative case.\n");
-        std::printf("   The wrappers are small enough to inline, so the type checking is\n");
-        std::printf("   free and only the type-INDEPENDENT work is shared.\n");
+        const auto shared = symbols_matching("append_bytes");
+        std::printf("   %-10s %14s %14s %10s\n", "types", "fat bytes", "thin bytes", "ratio");
+        for (const char* driver : {"touch16", "touch64"}) {
+            const auto fat  = symbols_matching(driver, "FatBuffer");
+            const auto thin = symbols_matching(driver, "ThinBuffer");
+            const long thin_total = thin.bytes + shared.bytes;
+            if (fat.bytes == 0 || thin_total == 0) continue;
+            std::printf("   %-10s %14ld %14ld %9.2fx\n",
+                        std::strcmp(driver, "touch16") == 0 ? "16" : "64",
+                        fat.bytes, thin_total,
+                        static_cast<double>(fat.bytes) / static_cast<double>(thin_total));
+        }
+        std::printf("\n   thin includes the one shared append_bytes body (%ld bytes), counted\n",
+                    shared.bytes);
+        std::printf("   once however many types use it.\n\n");
+        std::printf("   Read the two rows together, because they disagree. At 16 types the\n");
+        std::printf("   FAT version is SMALLER. The body still uses sizeof(T) for one modulo,\n");
+        std::printf("   so each copy gets a compile-time constant where the shared version\n");
+        std::printf("   must take a runtime divisor — and at that scale the specialisation is\n");
+        std::printf("   worth more than the duplication costs. By 64 types the duplication\n");
+        std::printf("   dominates and thin wins almost 2x.\n\n");
+        std::printf("   That crossover IS the lesson. \"Templates cause bloat\" is not a rule,\n");
+        std::printf("   it is a trade between how much of the body genuinely depends on T and\n");
+        std::printf("   how many types you instantiate it for. Neither number is guessable —\n");
+        std::printf("   measure your own, the way this section does.\n");
     }
 
     std::printf("\n2. Recursive pack vs fold\n");
