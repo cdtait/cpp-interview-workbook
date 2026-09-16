@@ -47,7 +47,7 @@ foreach(source_file IN LISTS SOURCES)
     # Most of the workbook is deliberately built without -O so that the source
     # and the behaviour line up. These examples are about the code the compiler
     # actually emits, so they would be meaningless unoptimised.
-    if("${target_name}" MATCHES "^J[0-9]")
+    if("${target_name}" MATCHES "^[JK][0-9]")
         target_compile_options("${target_name}" PRIVATE -O2)
     endif()
 endforeach()

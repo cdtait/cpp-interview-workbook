@@ -138,7 +138,23 @@ exactly that reason — read it before trusting a row.
   separately — plus the same publish sequence compiled for **x86-64 and
   aarch64** side by side, where `release` becomes `stlr` and `relaxed` does not.
 
-J-series targets are compiled `-O2` (see `CMakeLists.txt`); the rest of the
+### K — Templates
+- K1 mechanics: what deduction keeps and strips, forwarding references and
+  reference collapsing, why `std::forward` exists, pack expansion and folds
+  (left vs right shown with a non-associative operator), and the same constraint
+  written four ways — `void_t`, `enable_if`, `if constexpr`, concepts. Every
+  section prints the type it deduced.
+- K2 CRTP and its C++23 replacement: classic CRTP, its real costs (unrelated
+  base types, unchecked `static_cast`, aggregate-init gotcha), mixins, a
+  virtual-dispatch comparison, and the deducing-this version behind
+  `#if __cpp_explicit_this_parameter` — needs GCC 14+, so it does not compile
+  on GCC 10 and the program says so.
+- K3 template bloat, measured: the program reads its own symbol table with `nm`
+  to compare a fat template against a thin wrapper over a shared body, counts
+  instantiations for recursive packs vs folds, and times real compiles against
+  instantiation count.
+
+J- and K-series targets are compiled `-O2` (see `CMakeLists.txt`); the rest of the
 workbook is deliberately unoptimised so source and behaviour line up.
 
 The project uses C++20 because several examples use `std::erase`, `std::ssize`, and concepts.
