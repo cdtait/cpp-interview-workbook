@@ -167,6 +167,16 @@ exactly that reason — read it before trusting a row.
   the design exists for: under load batches grow, so per-event synchronisation
   falls and throughput rises to meet the load.
 
+- K4 `constexpr` / `consteval` / `constinit`: what each actually promises.
+  Compiles the same source at `-O0` and `-O2` to show that `constexpr` on a
+  function is a permission the *optimiser* honours, not a guarantee — the
+  guarantee comes from the context. Shows `consteval` refusing to compile a
+  runtime call, `constinit` refusing a non-constant initialiser,
+  `std::is_constant_evaluated` taking two paths, a compile-built table verified
+  in `.rodata` (and vanishing entirely when indexed only by constants), and the
+  two separate evaluation budgets `-fconstexpr-ops-limit` and
+  `-fconstexpr-loop-limit`.
+
 J- and K-series targets are compiled `-O2` (see `CMakeLists.txt`); the rest of the
 workbook is deliberately unoptimised so source and behaviour line up.
 
